@@ -1,17 +1,12 @@
 const express = require('express');
 const router = express.Router();
 const multer = require('multer');
+const mongoose = require('mongoose');
 const path = require('path');
 const fs = require('fs');
-const { v2: cloudinary } = require('cloudinary');
+const { GridFSBucket } = require('mongodb');
 const Shop = require('../models/Shop');
 const auth = require('../middleware/auth');
-
-cloudinary.config({
-  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-  api_key: process.env.CLOUDINARY_API_KEY,
-  api_secret: process.env.CLOUDINARY_API_SECRET
-});
 
 const fileFilter = (req, file, cb) => {
   if (file.mimetype.startsWith('image/')) {
@@ -29,35 +24,34 @@ const upload = multer({
   }
 });
 
-const uploadToCloudinary = file =>
+const getImageBucket = () => {
+  if (mongoose.connection.readyState !== 1 || !mongoose.connection.db) {
+    throw new Error('Image storage is not available.');
+  }
+  return new GridFSBucket(mongoose.connection.db, { bucketName: 'shopImages' });
+};
+
+const uploadImage = file =>
   new Promise((resolve, reject) => {
-    if (!process.env.CLOUDINARY_CLOUD_NAME ||
-        !process.env.CLOUDINARY_API_KEY ||
-        !process.env.CLOUDINARY_API_SECRET) {
-      reject(new Error('Image storage is not configured on the server.'));
-      return;
+    try {
+      const bucket = getImageBucket();
+      const stream = bucket.openUploadStream(file.originalname, {
+        contentType: file.mimetype
+      });
+
+      stream.on('error', reject);
+      stream.on('finish', () => resolve({
+        fileId: stream.id
+      }));
+      stream.end(file.buffer);
+    } catch (error) {
+      reject(error);
     }
-
-    const stream = cloudinary.uploader.upload_stream(
-      {
-        folder: 'vendor-availability-check/shops',
-        resource_type: 'image'
-      },
-      (error, result) => {
-        if (error) {
-          reject(error);
-          return;
-        }
-        resolve(result);
-      }
-    );
-
-    stream.end(file.buffer);
   });
 
-const deleteCloudinaryImage = async publicId => {
-  if (publicId) {
-    await cloudinary.uploader.destroy(publicId, { resource_type: 'image' });
+const deleteImage = async fileId => {
+  if (fileId) {
+    await getImageBucket().delete(new mongoose.Types.ObjectId(fileId));
   }
 };
 
@@ -71,15 +65,40 @@ router.get('/', async (req, res) => {
   }
 });
 
+// Stream a stored shop image from MongoDB GridFS
+router.get('/images/:id', async (req, res) => {
+  try {
+    const fileId = new mongoose.Types.ObjectId(req.params.id);
+    const bucket = getImageBucket();
+    const files = await bucket.find({ _id: fileId }).toArray();
+
+    if (!files.length) {
+      return res.status(404).send('Image not found');
+    }
+
+    res.set('Content-Type', files[0].contentType || 'application/octet-stream');
+    bucket.openDownloadStream(fileId).on('error', () => {
+      if (!res.headersSent) {
+        res.status(404).send('Image not found');
+      }
+    }).pipe(res);
+  } catch (error) {
+    if (error instanceof mongoose.Error || error.name === 'BSONError') {
+      return res.status(404).send('Image not found');
+    }
+    res.status(500).json({ message: error.message });
+  }
+});
+
 // Create a new shop (protected route)
 router.post('/', auth, upload.single('image'), async (req, res) => {
   try {
-    const uploadedImage = req.file ? await uploadToCloudinary(req.file) : null;
+    const uploadedImage = req.file ? await uploadImage(req.file) : null;
     const shopData = {
       ...req.body,
       ownerId: req.user._id,
-      imageUrl: uploadedImage ? uploadedImage.secure_url : null,
-      imagePublicId: uploadedImage ? uploadedImage.public_id : null,
+      imageUrl: uploadedImage ? `/api/shops/images/${uploadedImage.fileId}` : null,
+      imageFileId: uploadedImage ? uploadedImage.fileId : null,
       isOpen: req.body.isOpen === 'true'
     };
 
@@ -116,11 +135,11 @@ router.put('/:id', auth, upload.single('image'), async (req, res) => {
       return res.status(403).json({ message: 'Not authorized to update this shop' });
     }
 
-    const uploadedImage = req.file ? await uploadToCloudinary(req.file) : null;
+    const uploadedImage = req.file ? await uploadImage(req.file) : null;
     const updates = {
       ...req.body,
-      imageUrl: uploadedImage ? uploadedImage.secure_url : shop.imageUrl,
-      imagePublicId: uploadedImage ? uploadedImage.public_id : shop.imagePublicId,
+      imageUrl: uploadedImage ? `/api/shops/images/${uploadedImage.fileId}` : shop.imageUrl,
+      imageFileId: uploadedImage ? uploadedImage.fileId : shop.imageFileId,
       isOpen: req.body.isOpen === 'true'
     };
 
@@ -130,8 +149,8 @@ router.put('/:id', auth, upload.single('image'), async (req, res) => {
       { new: true }
     );
 
-    if (uploadedImage && shop.imagePublicId) {
-      await deleteCloudinaryImage(shop.imagePublicId);
+    if (uploadedImage && shop.imageFileId) {
+      await deleteImage(shop.imageFileId);
     }
 
     res.json(updatedShop);
@@ -152,8 +171,8 @@ router.delete('/:id', auth, async (req, res) => {
       return res.status(403).json({ message: 'Not authorized to delete this shop' });
     }
 
-    if (shop.imagePublicId) {
-      await deleteCloudinaryImage(shop.imagePublicId);
+    if (shop.imageFileId) {
+      await deleteImage(shop.imageFileId);
     } else if (shop.imageUrl && shop.imageUrl.startsWith('/uploads/')) {
       const imagePath = path.join(__dirname, '..', shop.imageUrl);
       if (fs.existsSync(imagePath)) {

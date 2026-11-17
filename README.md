@@ -2,16 +2,6 @@
 
 ## Persistent shop images
 
-Shop images are stored in Cloudinary so they remain available after a server
-restart or redeploy. Configure these environment variables in the backend
-deployment before accepting uploads:
-
-```env
-CLOUDINARY_CLOUD_NAME=...
-CLOUDINARY_API_KEY=...
-CLOUDINARY_API_SECRET=...
-```
-
-The Cloudinary credentials are available in the Cloudinary dashboard under
-**Settings > API Keys**. Never commit the real values; use the deployment
-platform's secret/environment variable settings.
+Shop images are stored in MongoDB GridFS. They remain available after browser
+refreshes and backend restarts as long as the configured MongoDB database is
+available. No image-storage credentials beyond `MONGODB_URI` are required.

@@ -29,8 +29,8 @@ const shopSchema = new mongoose.Schema({
   imageUrl: {
     type: String
   },
-  imagePublicId: {
-    type: String
+  imageFileId: {
+    type: mongoose.Schema.Types.ObjectId
   },
   createdAt: {
     type: Date,
