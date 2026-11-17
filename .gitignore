@@ -1,2 +1,5 @@
 .env
 /backend/uploads/
+.env.examples
+node_modules/
+package-lock.json

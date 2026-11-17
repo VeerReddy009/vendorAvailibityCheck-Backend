@@ -29,6 +29,9 @@ const shopSchema = new mongoose.Schema({
   imageUrl: {
     type: String
   },
+  imagePublicId: {
+    type: String
+  },
   createdAt: {
     type: Date,
     default: Date.now

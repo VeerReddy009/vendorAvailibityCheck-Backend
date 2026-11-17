@@ -3,22 +3,14 @@ const router = express.Router();
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
+const { v2: cloudinary } = require('cloudinary');
 const Shop = require('../models/Shop');
 const auth = require('../middleware/auth');
 
-// Configure multer for file uploads
-const storage = multer.diskStorage({
-  destination: function (req, file, cb) {
-    const uploadsDir = path.join(__dirname, '..', 'uploads');
-    if (!fs.existsSync(uploadsDir)) {
-      fs.mkdirSync(uploadsDir);
-    }
-    cb(null, uploadsDir);
-  },
-  filename: function (req, file, cb) {
-    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-    cb(null, uniqueSuffix + path.extname(file.originalname));
-  }
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET
 });
 
 const fileFilter = (req, file, cb) => {
@@ -30,12 +22,44 @@ const fileFilter = (req, file, cb) => {
 };
 
 const upload = multer({
-  storage: storage,
-  fileFilter: fileFilter,
+  storage: multer.memoryStorage(),
+  fileFilter,
   limits: {
-    fileSize: 5 * 1024 * 1024 // 5MB limit
+    fileSize: 5 * 1024 * 1024
   }
 });
+
+const uploadToCloudinary = file =>
+  new Promise((resolve, reject) => {
+    if (!process.env.CLOUDINARY_CLOUD_NAME ||
+        !process.env.CLOUDINARY_API_KEY ||
+        !process.env.CLOUDINARY_API_SECRET) {
+      reject(new Error('Image storage is not configured on the server.'));
+      return;
+    }
+
+    const stream = cloudinary.uploader.upload_stream(
+      {
+        folder: 'vendor-availability-check/shops',
+        resource_type: 'image'
+      },
+      (error, result) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve(result);
+      }
+    );
+
+    stream.end(file.buffer);
+  });
+
+const deleteCloudinaryImage = async publicId => {
+  if (publicId) {
+    await cloudinary.uploader.destroy(publicId, { resource_type: 'image' });
+  }
+};
 
 // Get all shops (public route)
 router.get('/', async (req, res) => {
@@ -50,10 +74,12 @@ router.get('/', async (req, res) => {
 // Create a new shop (protected route)
 router.post('/', auth, upload.single('image'), async (req, res) => {
   try {
+    const uploadedImage = req.file ? await uploadToCloudinary(req.file) : null;
     const shopData = {
       ...req.body,
       ownerId: req.user._id,
-      imageUrl: req.file ? `/uploads/${req.file.filename}` : null,
+      imageUrl: uploadedImage ? uploadedImage.secure_url : null,
+      imagePublicId: uploadedImage ? uploadedImage.public_id : null,
       isOpen: req.body.isOpen === 'true'
     };
 
@@ -86,14 +112,15 @@ router.put('/:id', auth, upload.single('image'), async (req, res) => {
       return res.status(404).json({ message: 'Shop not found' });
     }
 
-    // Check if user is the owner
     if (shop.ownerId.toString() !== req.user._id.toString()) {
       return res.status(403).json({ message: 'Not authorized to update this shop' });
     }
 
+    const uploadedImage = req.file ? await uploadToCloudinary(req.file) : null;
     const updates = {
       ...req.body,
-      imageUrl: req.file ? `/uploads/${req.file.filename}` : shop.imageUrl,
+      imageUrl: uploadedImage ? uploadedImage.secure_url : shop.imageUrl,
+      imagePublicId: uploadedImage ? uploadedImage.public_id : shop.imagePublicId,
       isOpen: req.body.isOpen === 'true'
     };
 
@@ -102,6 +129,10 @@ router.put('/:id', auth, upload.single('image'), async (req, res) => {
       updates,
       { new: true }
     );
+
+    if (uploadedImage && shop.imagePublicId) {
+      await deleteCloudinaryImage(shop.imagePublicId);
+    }
 
     res.json(updatedShop);
   } catch (error) {
@@ -117,13 +148,13 @@ router.delete('/:id', auth, async (req, res) => {
       return res.status(404).json({ message: 'Shop not found' });
     }
 
-    // Check if user is the owner
     if (shop.ownerId.toString() !== req.user._id.toString()) {
       return res.status(403).json({ message: 'Not authorized to delete this shop' });
     }
 
-    // Delete the shop's image if it exists
-    if (shop.imageUrl) {
+    if (shop.imagePublicId) {
+      await deleteCloudinaryImage(shop.imagePublicId);
+    } else if (shop.imageUrl && shop.imageUrl.startsWith('/uploads/')) {
       const imagePath = path.join(__dirname, '..', shop.imageUrl);
       if (fs.existsSync(imagePath)) {
         fs.unlinkSync(imagePath);
@@ -145,7 +176,6 @@ router.patch('/:id/toggle-status', auth, async (req, res) => {
       return res.status(404).json({ message: 'Shop not found' });
     }
 
-    // Check if user is the owner
     if (shop.ownerId.toString() !== req.user._id.toString()) {
       return res.status(403).json({ message: 'Not authorized to update this shop' });
     }
@@ -158,4 +188,4 @@ router.patch('/:id/toggle-status', auth, async (req, res) => {
   }
 });
 
-module.exports = router; 
+module.exports = router;
